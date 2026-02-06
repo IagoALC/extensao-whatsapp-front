@@ -1,0 +1,35 @@
+{
+  "name": "wa-copilot-extension",
+  "description": "Extensao para resumo, sugestoes e relatorios no WhatsApp Web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "compile": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "dexie": "^4.2.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "webextension-polyfill": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3",
+    "@types/webextension-polyfill": "^0.12.4",
+    "@wxt-dev/module-react": "^1.1.5",
+    "jsdom": "^27.2.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "wxt": "^0.20.6"
+  }
+}

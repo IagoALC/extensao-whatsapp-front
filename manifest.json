@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "WA Copilot",
+  "version": "0.1.0",
+  "description": "Resumo, sugestoes e relatorios no WhatsApp Web.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://web.whatsapp.com/*"],
+  "optional_host_permissions": [
+    "http://localhost:8080/*",
+    "https://api.wacopilot.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "WA Copilot"
+  }
+}
