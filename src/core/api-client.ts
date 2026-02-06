@@ -2,6 +2,8 @@ import { getRuntimeSettings } from './settings';
 
 export type Tone = 'formal' | 'neutro' | 'amigavel';
 
+const SUGGESTIONS_TIMEOUT_MS = 20000;
+
 export interface ConversationRef {
   tenant_id: string;
   conversation_id: string;
@@ -13,6 +15,7 @@ export interface SuggestionRequest {
   locale: string;
   tone: Tone;
   context_window: number;
+  messages?: string[];
   max_candidates?: number;
   include_last_user_message?: boolean;
 }
@@ -175,7 +178,7 @@ export class ApiClient {
     payload: SuggestionRequest,
   ): Promise<SuggestionResponse> {
     return this.request<SuggestionResponse>('/v1/suggestions', 'POST', payload, {
-      timeoutMs: 2000,
+      timeoutMs: SUGGESTIONS_TIMEOUT_MS,
     });
   }
 

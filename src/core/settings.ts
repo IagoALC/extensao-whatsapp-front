@@ -1,8 +1,29 @@
 import browser from 'webextension-polyfill';
 
-const DEFAULT_API_BASE_URL = 'http://localhost:8080';
-const SYNC_KEYS = ['apiBaseUrl', 'consentGranted'];
-const LOCAL_KEYS = ['apiAuthToken'];
+// API settings are intentionally code-driven (not user-editable in UI).
+const CONSENT_SYNC_KEY = 'consentGranted';
+const ENV = import.meta.env as Record<string, string | boolean | undefined>;
+
+function readEnvValue(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const raw = ENV[key];
+    if (typeof raw !== 'string') {
+      continue;
+    }
+    const value = raw.trim();
+    if (value.length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+const API_BASE_URL = normalizeBaseUrl(
+  readEnvValue('WXT_API_BASE_URL', 'VITE_API_BASE_URL') ??
+    'http://localhost:8080',
+);
+const API_AUTH_TOKEN =
+  readEnvValue('WXT_API_AUTH_TOKEN', 'VITE_API_AUTH_TOKEN') ?? 'dev-token';
 
 export interface RuntimeSettings {
   apiBaseUrl: string;
@@ -14,33 +35,12 @@ function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '');
 }
 
-function toOriginPattern(baseUrl: string): string | null {
-  try {
-    const url = new URL(baseUrl);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      return null;
-    }
-    return `${url.protocol}//${url.host}/*`;
-  } catch {
-    return null;
-  }
-}
-
 export async function getRuntimeSettings(): Promise<RuntimeSettings> {
-  const [syncValues, localValues] = await Promise.all([
-    browser.storage.sync.get(SYNC_KEYS),
-    browser.storage.local.get(LOCAL_KEYS),
-  ]);
-
-  const baseUrlRaw =
-    typeof syncValues.apiBaseUrl === 'string' && syncValues.apiBaseUrl.length > 0
-      ? syncValues.apiBaseUrl
-      : DEFAULT_API_BASE_URL;
+  const syncValues = await browser.storage.sync.get([CONSENT_SYNC_KEY]);
 
   return {
-    apiBaseUrl: normalizeBaseUrl(baseUrlRaw),
-    apiAuthToken:
-      typeof localValues.apiAuthToken === 'string' ? localValues.apiAuthToken : '',
+    apiBaseUrl: API_BASE_URL,
+    apiAuthToken: API_AUTH_TOKEN,
     consentGranted: syncValues.consentGranted === true,
   };
 }
@@ -49,41 +49,4 @@ export async function setConsentGranted(value: boolean): Promise<void> {
   await browser.storage.sync.set({ consentGranted: value });
 }
 
-export async function saveApiSettings(
-  baseUrl: string,
-  apiAuthToken: string,
-): Promise<void> {
-  await Promise.all([
-    browser.storage.sync.set({ apiBaseUrl: normalizeBaseUrl(baseUrl) }),
-    browser.storage.local.set({ apiAuthToken: apiAuthToken.trim() }),
-  ]);
-}
-
-export async function ensureApiHostPermission(baseUrl: string): Promise<boolean> {
-  const originPattern = toOriginPattern(baseUrl);
-  if (!originPattern) {
-    return false;
-  }
-
-  try {
-    const alreadyGranted = await browser.permissions.contains({
-      origins: [originPattern],
-    });
-    if (alreadyGranted) {
-      return true;
-    }
-
-    return browser.permissions.request({
-      origins: [originPattern],
-    });
-  } catch {
-    return false;
-  }
-}
-
-export async function hasApiToken(): Promise<boolean> {
-  const stored = await browser.storage.local.get(LOCAL_KEYS);
-  return typeof stored.apiAuthToken === 'string' && stored.apiAuthToken.length > 0;
-}
-
-export { DEFAULT_API_BASE_URL };
+export { API_BASE_URL, API_AUTH_TOKEN };

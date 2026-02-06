@@ -87,11 +87,13 @@ function renderApp(
   root: ReturnType<typeof createRoot>,
   runtime: AppRuntime,
   conversationId: string,
+  conversationTitle: string,
   options: RenderOptions,
 ): void {
   root.render(
     <SidebarApp
       conversationId={conversationId}
+      conversationTitle={conversationTitle}
       db={runtime.db}
       queue={runtime.queue}
       consentGranted={options.consentGranted}
@@ -123,6 +125,7 @@ export default defineContentScript({
 
       const runtime: AppRuntime = { db, queue };
       let currentConversationId = getCurrentConversationId();
+      let currentConversationTitle = getCurrentConversationTitle();
       const settings = await getRuntimeSettings();
       let consentGranted = settings.consentGranted;
       let observer: WhatsappConversationObserver | null = null;
@@ -156,7 +159,7 @@ export default defineContentScript({
       };
 
       const rerender = () =>
-        renderApp(root, runtime, currentConversationId, {
+        renderApp(root, runtime, currentConversationId, currentConversationTitle, {
           consentGranted,
           onGrantConsent: async () => {
             await setConsentGranted(true);
@@ -193,8 +196,13 @@ export default defineContentScript({
 
       window.setInterval(() => {
         const nextConversationId = getCurrentConversationId();
-        if (nextConversationId !== currentConversationId) {
+        const nextConversationTitle = getCurrentConversationTitle();
+        if (
+          nextConversationId !== currentConversationId ||
+          nextConversationTitle !== currentConversationTitle
+        ) {
           currentConversationId = nextConversationId;
+          currentConversationTitle = nextConversationTitle;
           rerender();
         }
       }, POLL_INTERVAL_MS);

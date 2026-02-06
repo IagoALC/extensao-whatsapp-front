@@ -7,21 +7,19 @@ import {
   createApiClient,
   type SuggestionResponse,
 } from '../../core/api-client';
-import {
-  ensureApiHostPermission,
-  getRuntimeSettings,
-  saveApiSettings,
-} from '../../core/settings';
 import type { QueueEvent, LocalJobQueue } from '../../core/job-queue';
 import {
   clearConversationData,
   countMessagesByConversation,
+  listMessagesByConversation,
+  type MessageRecord,
   type WACopilotDb,
 } from '../../storage/db';
 import SendGuard from './SendGuard';
 
 interface SidebarAppProps {
   conversationId: string;
+  conversationTitle: string;
   db: WACopilotDb;
   queue: LocalJobQueue;
   consentGranted: boolean;
@@ -39,6 +37,61 @@ const sectionStyle: React.CSSProperties = {
   gap: 8,
 };
 
+const MIN_CONTEXT_MESSAGES = 12;
+const MAX_CONTEXT_MESSAGES = 80;
+const MAX_CONTEXT_MESSAGE_CHARS = 360;
+
+function deriveSuggestionMessageLimit(contextWindow: number): number {
+  if (!Number.isFinite(contextWindow)) {
+    return 20;
+  }
+  const scaled = Math.round(contextWindow * 2);
+  if (scaled < MIN_CONTEXT_MESSAGES) {
+    return MIN_CONTEXT_MESSAGES;
+  }
+  if (scaled > MAX_CONTEXT_MESSAGES) {
+    return MAX_CONTEXT_MESSAGES;
+  }
+  return scaled;
+}
+
+function truncateContextMessage(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}...`;
+}
+
+function formatMessageForSuggestionContext(message: MessageRecord): string {
+  const speaker =
+    message.authorRole === 'self'
+      ? 'Voce'
+      : message.authorRole === 'contact'
+        ? 'Contato'
+        : 'Sistema';
+  const normalized = (message.textNormalized || message.text)
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) {
+    return '';
+  }
+  return `${speaker}: ${truncateContextMessage(normalized, MAX_CONTEXT_MESSAGE_CHARS)}`;
+}
+
+function formatConversationLabel(conversationId: string): string {
+  const normalized = conversationId
+    .replace(/^wa:title:/i, '')
+    .replace(/^wa:path:/i, '')
+    .replace(/^wa:/i, '')
+    .replace(/[-_]+/g, ' ')
+    .trim();
+
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return 'Conversa atual';
+}
+
 function formatQueueEvent(event: QueueEvent): string {
   if (event.type === 'enqueued') {
     return `Job ${event.kind} enfileirado (${event.jobId.slice(0, 8)}).`;
@@ -55,7 +108,7 @@ function formatQueueEvent(event: QueueEvent): string {
 function mapApiError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 401 || error.status === 403) {
-      return 'Falha de autenticacao. Confira token de API.';
+      return 'Falha de autenticacao. Confira o token definido em codigo.';
     }
     if (error.status === 429) {
       return 'Limite de requisicoes atingido. Tente novamente em instantes.';
@@ -146,6 +199,7 @@ function insertTextIntoComposer(text: string): void {
 
 function SidebarApp({
   conversationId,
+  conversationTitle,
   db,
   queue,
   consentGranted,
@@ -166,10 +220,7 @@ function SidebarApp({
   const [statusText, setStatusText] = useState('');
   const [errorText, setErrorText] = useState('');
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
-  const [savingSettings, setSavingSettings] = useState(false);
   const [updatingConsent, setUpdatingConsent] = useState(false);
-  const [apiBaseUrl, setApiBaseUrl] = useState('');
-  const [apiAuthToken, setApiAuthToken] = useState('');
 
   const conversationRef = useMemo(
     () => ({
@@ -179,21 +230,6 @@ function SidebarApp({
     }),
     [conversationId],
   );
-
-  useEffect(() => {
-    let mounted = true;
-    void getRuntimeSettings().then((settings) => {
-      if (!mounted) {
-        return;
-      }
-      setApiBaseUrl(settings.apiBaseUrl);
-      setApiAuthToken(settings.apiAuthToken);
-    });
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -248,30 +284,6 @@ function SidebarApp({
     };
   }, [conversationId, db, queue]);
 
-  const handleSaveSettings = async () => {
-    setSavingSettings(true);
-    setErrorText('');
-    setStatusText('');
-
-    try {
-      await saveApiSettings(apiBaseUrl, apiAuthToken);
-      const refreshedClient = await createApiClient();
-      queue.setApiClient(refreshedClient);
-      const permissionGranted = await ensureApiHostPermission(apiBaseUrl);
-      if (!permissionGranted) {
-        setErrorText(
-          'Permissao opcional de host nao concedida. Requisicoes para esse host podem falhar.',
-        );
-      } else {
-        setStatusText('Configuracoes de API salvas.');
-      }
-    } catch (error) {
-      setErrorText(`Falha ao salvar configuracoes: ${mapApiError(error)}`);
-    } finally {
-      setSavingSettings(false);
-    }
-  };
-
   const handleGenerateSuggestions = async () => {
     if (!consentGranted) {
       setErrorText('Consentimento obrigatorio para gerar sugestoes.');
@@ -283,12 +295,22 @@ function SidebarApp({
     setStatusText('');
 
     try {
-      const apiClient = await createApiClient();
+      const [apiClient, recentMessages] = await Promise.all([
+        createApiClient(),
+        listMessagesByConversation(
+          conversationId,
+          deriveSuggestionMessageLimit(contextWindow),
+        ),
+      ]);
+      const contextMessages = recentMessages
+        .map((message) => formatMessageForSuggestionContext(message))
+        .filter((message) => message.length > 0);
       const response = await apiClient.createSuggestions({
         conversation: conversationRef,
         locale,
         tone,
         context_window: contextWindow,
+        messages: contextMessages,
         max_candidates: 3,
         include_last_user_message: true,
       });
@@ -491,45 +513,9 @@ function SidebarApp({
       </div>
 
       <div style={sectionStyle}>
-        <strong style={{ fontSize: 13 }}>Configuracao de API</strong>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 12 }}>Base URL</span>
-          <input
-            value={apiBaseUrl}
-            onChange={(event) => setApiBaseUrl(event.target.value)}
-            placeholder="http://localhost:8080"
-            style={{ height: 30, padding: '0 8px' }}
-          />
-        </label>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 12 }}>API Token (Bearer)</span>
-          <input
-            type="password"
-            value={apiAuthToken}
-            onChange={(event) => setApiAuthToken(event.target.value)}
-            placeholder="token"
-            style={{ height: 30, padding: '0 8px' }}
-          />
-        </label>
-        <button
-          type="button"
-          onClick={() => void handleSaveSettings()}
-          disabled={savingSettings}
-          style={{
-            height: 34,
-            borderRadius: 8,
-            border: '1px solid #7fb59d',
-            background: '#eef8f3',
-            cursor: 'pointer',
-          }}
-        >
-          {savingSettings ? 'Salvando...' : 'Salvar configuracoes'}
-        </button>
-      </div>
-
-      <div style={sectionStyle}>
         <div style={{ fontSize: 12, color: '#355d4b' }}>
-          Conversa: <strong>{conversationId}</strong>
+          Conversa:{' '}
+          <strong>{conversationTitle || formatConversationLabel(conversationId)}</strong>
         </div>
         <div style={{ fontSize: 12, color: '#355d4b' }}>
           Mensagens capturadas: <strong>{messageCount}</strong>
