@@ -5,8 +5,15 @@ import {
   type MessageEvent,
 } from '../shared/message-normalizer';
 
-const MESSAGE_SELECTOR = '[data-id], .message-in, .message-out';
+const MESSAGE_SELECTOR = '[data-id], .message-in, .message-out, [data-testid="msg-container"]';
 const MAX_SEEN_KEYS = 6000;
+const MESSAGE_TEXT_SELECTORS = [
+  '.selectable-text.copyable-text span',
+  '[data-testid="msg-text"] span',
+  '[data-testid="msg-container"] span[dir="auto"]',
+  'span[dir="auto"]',
+  'div[dir="auto"]',
+];
 
 export interface WhatsappObserverOptions {
   tenantId: string;
@@ -31,7 +38,7 @@ export class WhatsappConversationObserver {
       return;
     }
 
-    this.bootstrapExistingMessages();
+    this.refreshSnapshot();
 
     this.observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
@@ -55,8 +62,12 @@ export class WhatsappConversationObserver {
     this.started = false;
   }
 
-  private bootstrapExistingMessages(): void {
-    const nodes = document.querySelectorAll<HTMLElement>(MESSAGE_SELECTOR);
+  refreshSnapshot(): void {
+    const mainRoot = document.querySelector<HTMLElement>('#main');
+    if (!mainRoot) {
+      return;
+    }
+    const nodes = mainRoot.querySelectorAll<HTMLElement>(MESSAGE_SELECTOR);
     for (const node of nodes) {
       this.handleMessageElement(node);
     }
@@ -79,6 +90,10 @@ export class WhatsappConversationObserver {
 
   private handleMessageElement(element: HTMLElement): void {
     try {
+      if (!element.closest('#main')) {
+        return;
+      }
+
       const text = this.extractMessageText(element);
       if (!text) {
         return;
@@ -126,27 +141,26 @@ export class WhatsappConversationObserver {
   }
 
   private extractMessageText(element: HTMLElement): string {
-    const directText = element
-      .querySelector<HTMLElement>('.selectable-text.copyable-text span')
-      ?.innerText?.trim();
-    if (directText) {
-      return directText;
-    }
+    for (const selector of MESSAGE_TEXT_SELECTORS) {
+      const nodes = element.querySelectorAll<HTMLElement>(selector);
+      if (nodes.length === 0) {
+        continue;
+      }
 
-    const textSpans = element.querySelectorAll<HTMLElement>(
-      '.selectable-text.copyable-text span',
-    );
-    if (textSpans.length > 0) {
-      const joined = Array.from(textSpans)
-        .map((span) => span.innerText.trim())
+      const joined = Array.from(nodes)
+        .map((node) => node.innerText.trim())
         .filter(Boolean)
-        .join(' ');
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
       if (joined) {
         return joined;
       }
     }
 
-    return '';
+    const fallback = element.innerText.replace(/\s+/g, ' ').trim();
+    return fallback;
   }
 
   private inferAuthorRole(element: HTMLElement): MessageAuthorRole {

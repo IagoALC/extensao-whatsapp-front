@@ -23,8 +23,10 @@ function waitMutationCycle(): Promise<void> {
 describe('whatsapp-observer', () => {
   it('captura mensagens e evita duplicidade por fingerprint', async () => {
     document.body.innerHTML = `
-      <div class="message-in" data-id="msg-1">
-        <div class="selectable-text copyable-text"><span>primeira mensagem</span></div>
+      <div id="main">
+        <div class="message-in" data-id="msg-1">
+          <div class="selectable-text copyable-text"><span>primeira mensagem</span></div>
+        </div>
       </div>
     `;
 
@@ -43,7 +45,7 @@ describe('whatsapp-observer', () => {
     duplicate.setAttribute('data-id', 'msg-1');
     duplicate.innerHTML =
       '<div class="selectable-text copyable-text"><span>primeira mensagem</span></div>';
-    document.body.append(duplicate);
+    document.getElementById('main')?.append(duplicate);
 
     await waitMutationCycle();
     expect(onMessage).toHaveBeenCalledTimes(1);
@@ -53,7 +55,7 @@ describe('whatsapp-observer', () => {
     next.setAttribute('data-id', 'msg-2');
     next.innerHTML =
       '<div class="selectable-text copyable-text"><span>segunda mensagem</span></div>';
-    document.body.append(next);
+    document.getElementById('main')?.append(next);
 
     await waitMutationCycle();
     expect(onMessage).toHaveBeenCalledTimes(2);

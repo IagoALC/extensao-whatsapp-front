@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   type ReportRequest,
   type SummaryRequest,
@@ -20,6 +20,7 @@ import SendGuard from './SendGuard';
 interface SidebarAppProps {
   conversationId: string;
   conversationTitle: string;
+  conversationOpen: boolean;
   db: WACopilotDb;
   queue: LocalJobQueue;
   consentGranted: boolean;
@@ -27,19 +28,13 @@ interface SidebarAppProps {
   onRevokeConsent: () => Promise<void>;
 }
 
-const sectionStyle: React.CSSProperties = {
-  background: '#f6fcf9',
-  border: '1px solid #dbebe4',
-  borderRadius: 10,
-  padding: 10,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 8,
-};
-
 const MIN_CONTEXT_MESSAGES = 12;
 const MAX_CONTEXT_MESSAGES = 80;
 const MAX_CONTEXT_MESSAGE_CHARS = 360;
+const MIN_CONTEXT_WINDOW = 5;
+const MAX_CONTEXT_WINDOW = 80;
+const INITIAL_CONTEXT_CAPTURE_LIMIT = MAX_CONTEXT_MESSAGES;
+const INITIAL_CONTEXT_CAPTURE_DELAYS_MS = [250, 900, 1800, 3200, 5000];
 
 function deriveSuggestionMessageLimit(contextWindow: number): number {
   if (!Number.isFinite(contextWindow)) {
@@ -78,6 +73,14 @@ function formatMessageForSuggestionContext(message: MessageRecord): string {
   return `${speaker}: ${truncateContextMessage(normalized, MAX_CONTEXT_MESSAGE_CHARS)}`;
 }
 
+function buildSuggestionContext(messages: MessageRecord[]): string[] {
+  // DB returns newest-first; reverse to preserve natural conversation flow.
+  return [...messages]
+    .reverse()
+    .map((message) => formatMessageForSuggestionContext(message))
+    .filter((message) => message.length > 0);
+}
+
 function formatConversationLabel(conversationId: string): string {
   const normalized = conversationId
     .replace(/^wa:title:/i, '')
@@ -107,14 +110,29 @@ function formatQueueEvent(event: QueueEvent): string {
 
 function mapApiError(error: unknown): string {
   if (error instanceof ApiError) {
+    const payloadMessage =
+      typeof error.body === 'object' &&
+      error.body !== null &&
+      'error' in error.body &&
+      typeof (error.body as { error?: { message?: unknown } }).error?.message ===
+        'string'
+        ? ((error.body as { error?: { message?: string } }).error?.message ?? '')
+        : '';
+
     if (error.status === 401 || error.status === 403) {
       return 'Falha de autenticacao. Confira o token definido em codigo.';
+    }
+    if (error.status === 400 && payloadMessage) {
+      return `Requisicao invalida: ${payloadMessage}`;
     }
     if (error.status === 429) {
       return 'Limite de requisicoes atingido. Tente novamente em instantes.';
     }
     if (error.status === 504) {
       return 'Tempo limite excedido ao chamar o backend.';
+    }
+    if (payloadMessage) {
+      return `Erro de API (${error.status}): ${payloadMessage}`;
     }
     return `Erro de API (${error.status}).`;
   }
@@ -123,6 +141,19 @@ function mapApiError(error: unknown): string {
     return error.message;
   }
   return 'Erro desconhecido.';
+}
+
+function clampContextWindow(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 20;
+  }
+  if (value < MIN_CONTEXT_WINDOW) {
+    return MIN_CONTEXT_WINDOW;
+  }
+  if (value > MAX_CONTEXT_WINDOW) {
+    return MAX_CONTEXT_WINDOW;
+  }
+  return Math.round(value);
 }
 
 async function copyTextToClipboard(text: string): Promise<void> {
@@ -200,6 +231,7 @@ function insertTextIntoComposer(text: string): void {
 function SidebarApp({
   conversationId,
   conversationTitle,
+  conversationOpen,
   db,
   queue,
   consentGranted,
@@ -221,6 +253,11 @@ function SidebarApp({
   const [errorText, setErrorText] = useState('');
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [updatingConsent, setUpdatingConsent] = useState(false);
+  const [initialContextMessages, setInitialContextMessages] = useState<string[]>(
+    [],
+  );
+  const [initialContextCaptured, setInitialContextCaptured] = useState(false);
+  const initialContextCapturedRef = useRef(false);
 
   const conversationRef = useMemo(
     () => ({
@@ -284,9 +321,80 @@ function SidebarApp({
     };
   }, [conversationId, db, queue]);
 
+  useEffect(() => {
+    let mounted = true;
+    initialContextCapturedRef.current = false;
+    setInitialContextCaptured(false);
+    setInitialContextMessages([]);
+
+    if (!conversationOpen) {
+      return () => {
+        mounted = false;
+      };
+    }
+
+    const tryCaptureInitialContext = async () => {
+      if (!mounted || initialContextCapturedRef.current) {
+        return;
+      }
+
+      const recentMessages = await listMessagesByConversation(
+        conversationId,
+        INITIAL_CONTEXT_CAPTURE_LIMIT,
+      );
+      const contextMessages = buildSuggestionContext(recentMessages);
+      if (contextMessages.length === 0) {
+        return;
+      }
+
+      if (!mounted || initialContextCapturedRef.current) {
+        return;
+      }
+
+      initialContextCapturedRef.current = true;
+      setInitialContextMessages(contextMessages);
+      setInitialContextCaptured(true);
+      setStatusText(
+        `Contexto inicial capturado (${contextMessages.length} mensagem(ns)).`,
+      );
+    };
+
+    void tryCaptureInitialContext();
+    const timers = INITIAL_CONTEXT_CAPTURE_DELAYS_MS.map((delayMs) =>
+      window.setTimeout(() => {
+        void tryCaptureInitialContext();
+      }, delayMs),
+    );
+
+    return () => {
+      mounted = false;
+      for (const timerId of timers) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, [conversationId, conversationOpen]);
+
+  useEffect(() => {
+    setSuggestions([]);
+    setSuggestionsQuality(null);
+    setHitlRequired(true);
+    setErrorText('');
+    if (!initialContextCapturedRef.current) {
+      setStatusText('');
+    }
+  }, [conversationId, conversationOpen]);
+
   const handleGenerateSuggestions = async () => {
-    if (!consentGranted) {
-      setErrorText('Consentimento obrigatorio para gerar sugestoes.');
+    if (!conversationOpen) {
+      setErrorText('Abra uma conversa no WhatsApp para gerar sugestoes.');
+      return;
+    }
+    const hasStoredContext =
+      initialContextMessages.length > 0 || messageCount > 0;
+    if (!consentGranted && !hasStoredContext) {
+      setErrorText(
+        'Conceda consentimento para capturar contexto antes de gerar sugestoes.',
+      );
       return;
     }
 
@@ -295,31 +403,47 @@ function SidebarApp({
     setStatusText('');
 
     try {
-      const [apiClient, recentMessages] = await Promise.all([
-        createApiClient(),
-        listMessagesByConversation(
+      const contextLimit = deriveSuggestionMessageLimit(contextWindow);
+      let contextMessages =
+        initialContextCaptured && initialContextMessages.length > 0
+          ? initialContextMessages.slice(-contextLimit)
+          : [];
+
+      if (contextMessages.length === 0) {
+        const recentMessages = await listMessagesByConversation(
           conversationId,
-          deriveSuggestionMessageLimit(contextWindow),
-        ),
-      ]);
-      const contextMessages = recentMessages
-        .map((message) => formatMessageForSuggestionContext(message))
-        .filter((message) => message.length > 0);
+          contextLimit,
+        );
+        contextMessages = buildSuggestionContext(recentMessages);
+      }
+
+      if (contextMessages.length === 0) {
+        setErrorText(
+          'Nenhuma mensagem capturada para contexto. Aguarde alguns segundos e tente novamente.',
+        );
+        return;
+      }
+
+      const apiClient = await createApiClient();
       const response = await apiClient.createSuggestions({
         conversation: conversationRef,
         locale,
         tone,
         context_window: contextWindow,
         messages: contextMessages,
-        max_candidates: 3,
-        include_last_user_message: true,
       });
       setSuggestions(response.suggestions);
       setSuggestionsQuality(
         typeof response.quality_score === 'number' ? response.quality_score : null,
       );
       setHitlRequired(response.hitl_required !== false);
-      setStatusText('Sugestoes geradas com sucesso.');
+      setStatusText(
+        initialContextCaptured && initialContextMessages.length > 0
+          ? 'Sugestoes geradas com base no contexto inicial carregado.'
+          : !consentGranted
+            ? 'Sugestoes geradas com contexto local ja capturado.'
+          : 'Sugestoes geradas com sucesso.',
+      );
     } catch (error) {
       setSuggestionsQuality(null);
       setErrorText(`Erro ao gerar sugestoes: ${mapApiError(error)}`);
@@ -419,6 +543,9 @@ function SidebarApp({
       setSuggestions([]);
       setSuggestionsQuality(null);
       setMessageCount(0);
+      initialContextCapturedRef.current = false;
+      setInitialContextCaptured(false);
+      setInitialContextMessages([]);
       setStatusText('Dados locais da conversa removidos.');
     } catch (error) {
       setErrorText(`Falha ao limpar dados locais: ${mapApiError(error)}`);
@@ -453,228 +580,242 @@ function SidebarApp({
     }
   };
 
+  const conversationLabel = conversationTitle || formatConversationLabel(conversationId);
+  const conversationDisplayLabel = conversationOpen
+    ? conversationLabel
+    : 'Nenhuma conversa aberta';
+  const qualityLabel =
+    typeof suggestionsQuality === 'number'
+      ? `${(suggestionsQuality * 100).toFixed(0)}%`
+      : '--';
+  const contextMessageCount = initialContextCaptured
+    ? initialContextMessages.length
+    : messageCount;
+  const canGenerateSuggestions =
+    (consentGranted || contextMessageCount > 0) &&
+    conversationOpen &&
+    !loadingSuggestions;
+  const suggestionsPrerequisite = !conversationOpen
+    ? 'Abra uma conversa no WhatsApp para habilitar sugestoes.'
+    : initialContextCaptured
+      ? `Contexto inicial fixo: ${contextMessageCount} mensagem(ns) carregada(s).`
+      : `Contexto disponivel: ${contextMessageCount} mensagem(ns) lida(s).`;
+
   return (
-    <section
-      style={{
-        background: '#ffffff',
-        border: '1px solid #d8ebe4',
-        borderRadius: 12,
-        boxShadow: '0 10px 28px rgba(0, 0, 0, 0.12)',
-        padding: 12,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
-      }}
-    >
-      <header style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <strong style={{ color: '#0f5136' }}>WA Copilot</strong>
-        <span style={{ fontSize: 12, color: '#355d4b' }}>P5 Guardrails</span>
+    <section className="wa-shell">
+      <header className="wa-card wa-header">
+        <div>
+          <p className="wa-eyebrow">Assistente de Conversa</p>
+          <h1 className="wa-brand-title">WA Copilot</h1>
+          <p className="wa-subtitle">Resumo, resposta e relatorios com HITL.</p>
+        </div>
+        <div className="wa-header-badges">
+          <span className="wa-pill">P7</span>
+          <span className={`wa-pill ${consentGranted ? 'wa-pill--ok' : 'wa-pill--warning'}`}>
+            {consentGranted ? 'captura ativa' : 'captura pausada'}
+          </span>
+        </div>
       </header>
 
-      <div style={sectionStyle}>
-        <strong style={{ fontSize: 13 }}>Consentimento</strong>
-        <span style={{ fontSize: 12, color: '#355d4b' }}>
-          {consentGranted
-            ? 'Ativo: leitura de conversa habilitada.'
-            : 'Inativo: leitura de conversa bloqueada.'}
-        </span>
-        {!consentGranted ? (
-          <button
-            type="button"
-            onClick={() => void handleGrantConsentClick()}
-            disabled={updatingConsent}
-            style={{
-              height: 34,
-              borderRadius: 8,
-              border: 'none',
-              background: '#0f9960',
-              color: '#ffffff',
-              cursor: 'pointer',
-            }}
-          >
-            {updatingConsent ? 'Aplicando...' : 'Conceder consentimento'}
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => void handleRevokeConsentClick()}
-            disabled={updatingConsent}
-            style={{
-              height: 34,
-              borderRadius: 8,
-              border: '1px solid #d7a2a2',
-              background: '#fff5f5',
-              cursor: 'pointer',
-            }}
-          >
-            {updatingConsent ? 'Aplicando...' : 'Revogar consentimento'}
-          </button>
-        )}
-      </div>
-
-      <div style={sectionStyle}>
-        <div style={{ fontSize: 12, color: '#355d4b' }}>
-          Conversa:{' '}
-          <strong>{conversationTitle || formatConversationLabel(conversationId)}</strong>
+      <section className="wa-card wa-card--elevated">
+        <div className="wa-card-head">
+          <span className="wa-label">Conversa atual</span>
+          <h2 className="wa-conversation-title">{conversationDisplayLabel}</h2>
         </div>
-        <div style={{ fontSize: 12, color: '#355d4b' }}>
-          Mensagens capturadas: <strong>{messageCount}</strong>
+        <div className="wa-metric-grid">
+          <article className="wa-metric-card">
+            <span className="wa-metric-label">
+              {initialContextCaptured ? 'Msgs contexto inicial' : 'Mensagens'}
+            </span>
+            <strong className="wa-metric-value">{contextMessageCount}</strong>
+          </article>
+          <article className="wa-metric-card">
+            <span className="wa-metric-label">Fila pendente</span>
+            <strong className="wa-metric-value">{queuePending}</strong>
+          </article>
+          <article className="wa-metric-card">
+            <span className="wa-metric-label">Fila falha</span>
+            <strong className="wa-metric-value">{queueFailed}</strong>
+          </article>
+          <article className="wa-metric-card">
+            <span className="wa-metric-label">Qualidade IA</span>
+            <strong className="wa-metric-value">{qualityLabel}</strong>
+          </article>
         </div>
-        <div style={{ fontSize: 12, color: '#355d4b' }}>
-          Jobs pendentes: <strong>{queuePending}</strong> | falhos:{' '}
-          <strong>{queueFailed}</strong>
+      </section>
+
+      <section className="wa-card">
+        <div className="wa-card-head">
+          <h3 className="wa-section-title">Privacidade</h3>
+          <p className="wa-section-copy">
+            Captura so ocorre com consentimento explicito e pode ser revogada a qualquer momento.
+          </p>
         </div>
-      </div>
+        <button
+          type="button"
+          onClick={() =>
+            void (consentGranted ? handleRevokeConsentClick() : handleGrantConsentClick())
+          }
+          disabled={updatingConsent}
+          className={`wa-btn ${consentGranted ? 'wa-btn--danger' : 'wa-btn--primary'} wa-btn--lg`}
+        >
+          {updatingConsent
+            ? 'Aplicando...'
+            : consentGranted
+              ? 'Revogar consentimento'
+              : 'Conceder consentimento'}
+        </button>
+      </section>
 
-      <div style={sectionStyle}>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 12 }}>Tom</span>
-          <select
-            value={tone}
-            onChange={(event) => setTone(event.target.value as Tone)}
-            style={{ height: 32 }}
-          >
-            <option value="formal">Formal</option>
-            <option value="neutro">Neutro</option>
-            <option value="amigavel">Amigavel</option>
-          </select>
-        </label>
+      <section className="wa-card">
+        <div className="wa-card-head">
+          <h3 className="wa-section-title">Configuracao de resposta</h3>
+          <p className="wa-section-copy">
+            Ajuste tom, idioma e janela para refletir o contexto real da conversa.
+          </p>
+        </div>
 
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 12 }}>Idioma</span>
+        <div className="wa-field-grid">
+          <label className="wa-field">
+            <span className="wa-field-label">Tom</span>
+            <select
+              value={tone}
+              onChange={(event) => setTone(event.target.value as Tone)}
+              className="wa-select"
+            >
+              <option value="formal">Formal</option>
+              <option value="neutro">Neutro</option>
+              <option value="amigavel">Amigavel</option>
+            </select>
+          </label>
+
+          <label className="wa-field">
+            <span className="wa-field-label">Idioma</span>
+            <input
+              value={locale}
+              onChange={(event) => setLocale(event.target.value)}
+              placeholder="pt-BR"
+              className="wa-input"
+            />
+          </label>
+        </div>
+
+        <label className="wa-field">
+          <div className="wa-range-head">
+            <span className="wa-field-label">Janela de contexto</span>
+            <span className="wa-range-value">{contextWindow} msgs</span>
+          </div>
           <input
-            value={locale}
-            onChange={(event) => setLocale(event.target.value)}
-            placeholder="pt-BR"
-            style={{ height: 30, padding: '0 8px' }}
+            type="range"
+            min={MIN_CONTEXT_WINDOW}
+            max={MAX_CONTEXT_WINDOW}
+            value={contextWindow}
+            onChange={(event) =>
+              setContextWindow(clampContextWindow(Number(event.target.value)))
+            }
+            className="wa-range"
           />
-        </label>
-
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 12 }}>Janela de contexto</span>
           <input
             type="number"
             value={contextWindow}
-            min={5}
-            max={80}
-            onChange={(event) => {
-              const next = Number(event.target.value);
-              setContextWindow(Number.isNaN(next) ? 20 : next);
-            }}
-            style={{ height: 30, padding: '0 8px' }}
+            min={MIN_CONTEXT_WINDOW}
+            max={MAX_CONTEXT_WINDOW}
+            onChange={(event) =>
+              setContextWindow(clampContextWindow(Number(event.target.value)))
+            }
+            className="wa-input wa-input--compact"
           />
         </label>
-      </div>
+      </section>
 
-      <div style={{ display: 'grid', gap: 6 }}>
-        <button
-          type="button"
-          onClick={() => void handleGenerateSuggestions()}
-          disabled={loadingSuggestions || !consentGranted}
-          style={{
-            height: 34,
-            borderRadius: 8,
-            border: 'none',
-            background: '#0f9960',
-            color: '#ffffff',
-            cursor: 'pointer',
-            opacity: consentGranted ? 1 : 0.6,
-          }}
-        >
-          {loadingSuggestions ? 'Gerando...' : 'Gerar sugestoes'}
-        </button>
-        <button
-          type="button"
-          onClick={() => void handleEnqueueSummary()}
-          disabled={!consentGranted}
-          style={{
-            height: 34,
-            borderRadius: 8,
-            border: '1px solid #7fb59d',
-            background: '#eef8f3',
-            cursor: 'pointer',
-            opacity: consentGranted ? 1 : 0.6,
-          }}
-        >
-          Enfileirar resumo
-        </button>
-        <button
-          type="button"
-          onClick={() => void handleEnqueueReport()}
-          disabled={!consentGranted}
-          style={{
-            height: 34,
-            borderRadius: 8,
-            border: '1px solid #7fb59d',
-            background: '#eef8f3',
-            cursor: 'pointer',
-            opacity: consentGranted ? 1 : 0.6,
-          }}
-        >
-          Enfileirar relatorio
-        </button>
-        {queueFailed > 0 ? (
+      <section className="wa-card">
+        <div className="wa-card-head">
+          <h3 className="wa-section-title">Acoes</h3>
+          <p className="wa-section-copy">
+            Geracao assistida com fila para resumo e relatorios.
+          </p>
+          <p className="wa-section-copy">{suggestionsPrerequisite}</p>
+        </div>
+        <div className="wa-action-grid">
           <button
             type="button"
-            onClick={() => void handleRetryFailedJobs()}
-            style={{
-              height: 34,
-              borderRadius: 8,
-              border: '1px solid #d6ac3f',
-              background: '#fff8e3',
-              cursor: 'pointer',
-            }}
+            onClick={() => void handleGenerateSuggestions()}
+            disabled={!canGenerateSuggestions}
+            className="wa-btn wa-btn--primary wa-btn--lg"
           >
-            Reprocessar jobs falhos
+            {loadingSuggestions ? 'Gerando sugestoes...' : 'Gerar sugestoes'}
           </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => void handleClearConversation()}
-          style={{
-            height: 34,
-            borderRadius: 8,
-            border: '1px solid #d7a2a2',
-            background: '#fff5f5',
-            cursor: 'pointer',
-          }}
-        >
-          Limpar dados locais da conversa
-        </button>
-      </div>
 
-      <div style={sectionStyle}>
-        <strong style={{ fontSize: 13 }}>Sugestoes</strong>
-        <span style={{ fontSize: 11, color: '#355d4b' }}>
-          {hitlRequired
-            ? 'HITL obrigatorio: copiar/inserir exige confirmacao dupla.'
-            : 'HITL reportado como opcional pelo backend.'}
-          {typeof suggestionsQuality === 'number'
-            ? ` Qualidade: ${(suggestionsQuality * 100).toFixed(0)}%.`
-            : ''}
-        </span>
+          <button
+            type="button"
+            onClick={() => void handleEnqueueSummary()}
+            disabled={!consentGranted}
+            className="wa-btn wa-btn--secondary"
+          >
+            Enfileirar resumo
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleEnqueueReport()}
+            disabled={!consentGranted}
+            className="wa-btn wa-btn--secondary"
+          >
+            Enfileirar relatorio
+          </button>
+
+          {queueFailed > 0 ? (
+            <button
+              type="button"
+              onClick={() => void handleRetryFailedJobs()}
+              className="wa-btn wa-btn--warning"
+            >
+              Reprocessar jobs falhos
+            </button>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={() => void handleClearConversation()}
+            className="wa-btn wa-btn--ghost"
+          >
+            Limpar dados locais da conversa
+          </button>
+        </div>
+      </section>
+
+      <section className="wa-card wa-card--soft">
+        <div className="wa-card-head">
+          <h3 className="wa-section-title">Sugestoes</h3>
+          <p className="wa-section-copy">
+            {hitlRequired
+              ? 'HITL obrigatorio: copia ou insercao exigem confirmacao dupla.'
+              : 'HITL retornado como opcional pelo backend.'}
+          </p>
+        </div>
+
         {suggestions.length === 0 ? (
-          <span style={{ fontSize: 12, color: '#5a7467' }}>
-            Nenhuma sugestao gerada.
-          </span>
+          <div className="wa-empty-state">
+            <strong>Nenhuma sugestao gerada</strong>
+            <span>
+              {conversationOpen
+                ? initialContextCaptured
+                  ? 'A IA usa o contexto inicial carregado ao abrir a conversa.'
+                  : 'A IA gera respostas a partir das mensagens recentes da conversa aberta.'
+                : 'Abra uma conversa para permitir leitura de contexto e geracao de resposta.'}
+            </span>
+          </div>
         ) : (
-          <ol style={{ margin: 0, paddingInlineStart: 18, display: 'grid', gap: 6 }}>
+          <ol className="wa-suggestions-list">
             {suggestions.map((candidate) => (
-              <li
-                key={candidate.rank}
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1.4,
-                  display: 'grid',
-                  gap: 6,
-                  paddingBottom: 4,
-                }}
-              >
-                <span>{candidate.content}</span>
+              <li key={candidate.rank} className="wa-suggestion-item">
+                <div className="wa-suggestion-head">
+                  <span className="wa-rank">#{candidate.rank}</span>
+                  <span className="wa-suggestion-meta">Pronta para revisar e enviar</span>
+                </div>
+                <p className="wa-suggestion-content">{candidate.content}</p>
                 {candidate.rationale ? (
-                  <span style={{ fontSize: 11, color: '#5a7467' }}>
-                    {candidate.rationale}
-                  </span>
+                  <p className="wa-suggestion-rationale">Motivo: {candidate.rationale}</p>
                 ) : null}
                 <SendGuard
                   disabled={!consentGranted}
@@ -685,53 +826,24 @@ function SidebarApp({
             ))}
           </ol>
         )}
-      </div>
+      </section>
 
       {errorText ? (
-        <div
-          style={{
-            borderRadius: 8,
-            border: '1px solid #f0b6b6',
-            padding: '8px 10px',
-            fontSize: 12,
-            background: '#fff4f4',
-            color: '#8c1d1d',
-            display: 'grid',
-            gap: 8,
-          }}
-        >
+        <div className="wa-status-banner wa-status-banner--error">
           <span>{errorText}</span>
           <button
             type="button"
             onClick={() => void handleGenerateSuggestions()}
-            disabled={!consentGranted || loadingSuggestions}
-            style={{
-              height: 30,
-              borderRadius: 8,
-              border: '1px solid #d7a2a2',
-              background: '#ffffff',
-              cursor: 'pointer',
-              opacity: consentGranted ? 1 : 0.5,
-            }}
+            disabled={!canGenerateSuggestions}
+            className="wa-btn wa-btn--ghost"
           >
-            Tentar novamente sugestoes
+            Tentar novamente
           </button>
         </div>
       ) : null}
 
       {statusText ? (
-        <div
-          style={{
-            borderRadius: 8,
-            border: '1px solid #d8ebe4',
-            padding: '8px 10px',
-            fontSize: 12,
-            background: '#f8fffb',
-            color: '#184d36',
-          }}
-        >
-          {statusText}
-        </div>
+        <div className="wa-status-banner wa-status-banner--success">{statusText}</div>
       ) : null}
     </section>
   );

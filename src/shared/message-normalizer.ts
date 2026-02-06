@@ -129,9 +129,104 @@ function slugify(value: string): string {
     .slice(0, 48);
 }
 
+function isVisibleElement(element: Element): element is HTMLElement {
+  const target = element as HTMLElement;
+  return !!target.offsetParent || target.getClientRects().length > 0;
+}
+
+function normalizeTitleCandidate(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function isLikelyConversationTitle(value: string): boolean {
+  const normalized = normalizeTitleCandidate(value);
+  if (!normalized) {
+    return false;
+  }
+
+  const lowered = normalized.toLowerCase();
+  const ignoredValues = new Set([
+    'online',
+    'typing...',
+    'digitando...',
+    'visto por ultimo',
+    'last seen',
+  ]);
+
+  if (ignoredValues.has(lowered)) {
+    return false;
+  }
+
+  return true;
+}
+
+function readConversationTitleFromDom(): string | null {
+  const selectors = [
+    '#main header span[title]',
+    '#main [data-testid="conversation-info-header-chat-title"]',
+    '#main header h1 span[dir="auto"]',
+    '#main header h1 span',
+    '#main header span[dir="auto"]',
+    '#main header [role="button"] span',
+  ];
+
+  for (const selector of selectors) {
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
+    for (const node of nodes) {
+      if (!isVisibleElement(node)) {
+        continue;
+      }
+
+      const attrTitle = node.getAttribute('title')?.trim();
+      if (attrTitle && isLikelyConversationTitle(attrTitle)) {
+        return normalizeTitleCandidate(attrTitle);
+      }
+
+      const text = node.textContent?.trim();
+      if (text && isLikelyConversationTitle(text)) {
+        return normalizeTitleCandidate(text);
+      }
+    }
+  }
+
+  return null;
+}
+
+function hasVisibleConversationComposer(): boolean {
+  const selectors = [
+    '#main div[contenteditable="true"][data-tab]',
+    '#main [role="textbox"][contenteditable="true"]',
+    '#main footer div[contenteditable="true"][data-tab]',
+    '#main footer [role="textbox"][contenteditable="true"]',
+  ];
+
+  for (const selector of selectors) {
+    const node = document.querySelector(selector);
+    if (node && isVisibleElement(node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function hasOpenConversation(): boolean {
+  if (hasVisibleConversationComposer()) {
+    return true;
+  }
+
+  const hasKnownTitle = !!readConversationTitleFromDom();
+  if (!hasKnownTitle) {
+    return false;
+  }
+
+  const hasMessageNodes = !!document.querySelector(
+    '#main [data-id], #main .message-in, #main .message-out',
+  );
+  return hasMessageNodes;
+}
+
 export function getCurrentConversationTitle(): string {
-  const titleElement = document.querySelector<HTMLElement>('header span[title]');
-  const title = titleElement?.getAttribute('title')?.trim();
+  const title = readConversationTitleFromDom();
   if (title) {
     return title;
   }
@@ -151,7 +246,7 @@ export function getCurrentConversationId(): string {
     return `wa:path:${slugify(pathHint)}`;
   }
 
-  const title = getCurrentConversationTitle();
+  const title = readConversationTitleFromDom();
   if (title) {
     return `wa:title:${slugify(title)}`;
   }

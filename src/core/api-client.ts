@@ -1,4 +1,5 @@
 import { getRuntimeSettings } from './settings';
+import browser from 'webextension-polyfill';
 
 export type Tone = 'formal' | 'neutro' | 'amigavel';
 
@@ -117,6 +118,36 @@ async function readJsonSafe(response: Response): Promise<unknown> {
 export class ApiClient {
   constructor(private readonly options: ApiClientOptions) {}
 
+  private async requestViaBackground(
+    path: string,
+    method: 'GET' | 'POST',
+    headers: Record<string, string>,
+    body: string | undefined,
+    timeoutMs: number,
+  ): Promise<{
+    ok: boolean;
+    status: number;
+    body?: unknown;
+    networkError?: string;
+  }> {
+    return browser.runtime.sendMessage({
+      type: 'wa-copilot:api-request',
+      payload: {
+        baseUrl: this.options.baseUrl,
+        path,
+        method,
+        headers,
+        body,
+        timeoutMs,
+      },
+    }) as Promise<{
+      ok: boolean;
+      status: number;
+      body?: unknown;
+      networkError?: string;
+    }>;
+  }
+
   private async request<TResponse>(
     path: string,
     method: 'GET' | 'POST',
@@ -126,11 +157,9 @@ export class ApiClient {
       idempotencyKey?: string;
     },
   ): Promise<TResponse> {
-    const controller = new AbortController();
     const timeoutMs = config?.timeoutMs ?? this.options.timeoutMs ?? 5000;
-    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
-    const headers: HeadersInit = {
+    const headers: Record<string, string> = {
       Accept: 'application/json',
     };
 
@@ -147,30 +176,69 @@ export class ApiClient {
     }
 
     try {
-      const response = await fetch(`${this.options.baseUrl}${path}`, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
+      const serializedBody = body ? JSON.stringify(body) : undefined;
+      let transportResult:
+        | {
+            ok: boolean;
+            status: number;
+            body?: unknown;
+            networkError?: string;
+          }
+        | undefined;
 
-      const parsedBody = await readJsonSafe(response);
-      if (!response.ok) {
+      try {
+        transportResult = await this.requestViaBackground(
+          path,
+          method,
+          headers,
+          serializedBody,
+          timeoutMs,
+        );
+      } catch {
+        transportResult = undefined;
+      }
+
+      if (!transportResult) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(`${this.options.baseUrl}${path}`, {
+            method,
+            headers,
+            body: serializedBody,
+            signal: controller.signal,
+          });
+          const parsedBody = await readJsonSafe(response);
+          if (!response.ok) {
+            throw new ApiError(
+              `HTTP ${response.status} on ${method} ${path}`,
+              response.status,
+              parsedBody,
+            );
+          }
+          return parsedBody as TResponse;
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
+
+      if (transportResult.networkError) {
+        throw new Error(transportResult.networkError);
+      }
+      if (!transportResult.ok) {
         throw new ApiError(
-          `HTTP ${response.status} on ${method} ${path}`,
-          response.status,
-          parsedBody,
+          `HTTP ${transportResult.status} on ${method} ${path}`,
+          transportResult.status,
+          transportResult.body,
         );
       }
 
-      return parsedBody as TResponse;
+      return transportResult.body as TResponse;
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         throw new ApiError(`Request timeout after ${timeoutMs}ms`, 504);
       }
       throw error;
-    } finally {
-      window.clearTimeout(timeoutId);
     }
   }
 

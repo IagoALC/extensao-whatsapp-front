@@ -74,20 +74,15 @@ export default function SendGuard({
   };
 
   return (
-    <div style={{ display: 'grid', gap: 6 }}>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+    <div className="wa-guard">
+      <div className="wa-guard-actions">
         <button
           type="button"
           onClick={() => requestAction('copy')}
           disabled={disabled || running}
-          style={{
-            height: 28,
-            padding: '0 10px',
-            borderRadius: 7,
-            border: pendingAction === 'copy' ? '1px solid #c88f00' : '1px solid #7fb59d',
-            background: pendingAction === 'copy' ? '#fff8e3' : '#eef8f3',
-            cursor: disabled || running ? 'not-allowed' : 'pointer',
-          }}
+          className={`wa-btn wa-btn--tiny ${
+            pendingAction === 'copy' ? 'wa-btn--warning' : 'wa-btn--subtle'
+          }`}
         >
           {pendingAction === 'copy' ? 'Confirmar copia' : 'Copiar'}
         </button>
@@ -96,25 +91,24 @@ export default function SendGuard({
           type="button"
           onClick={() => requestAction('insert')}
           disabled={disabled || running}
-          style={{
-            height: 28,
-            padding: '0 10px',
-            borderRadius: 7,
-            border: pendingAction === 'insert' ? '1px solid #c88f00' : '1px solid #7fb59d',
-            background: pendingAction === 'insert' ? '#fff8e3' : '#eef8f3',
-            cursor: disabled || running ? 'not-allowed' : 'pointer',
-          }}
+          className={`wa-btn wa-btn--tiny ${
+            pendingAction === 'insert' ? 'wa-btn--warning' : 'wa-btn--subtle'
+          }`}
         >
           {pendingAction === 'insert' ? 'Confirmar insercao' : 'Inserir no campo'}
         </button>
       </div>
 
-      <span style={{ fontSize: 11, color: '#355d4b' }}>
+      <span className="wa-guard-note">
         HITL ativo: a extensao nunca envia mensagens automaticamente.
       </span>
 
       {feedback ? (
-        <span style={{ fontSize: 11, color: feedbackError ? '#8c1d1d' : '#184d36' }}>
+        <span
+          className={`wa-guard-feedback ${
+            feedbackError ? 'wa-guard-feedback--error' : 'wa-guard-feedback--ok'
+          }`}
+        >
           {feedback}
         </span>
       ) : null}
