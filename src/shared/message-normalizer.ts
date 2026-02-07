@@ -192,6 +192,25 @@ function readConversationTitleFromDom(): string | null {
   return null;
 }
 
+function readConversationIdFromMessageNodes(): string | null {
+  const nodes = document.querySelectorAll<HTMLElement>('#main [data-id]');
+  for (const node of nodes) {
+    const dataId = node.getAttribute('data-id')?.trim();
+    if (!dataId) {
+      continue;
+    }
+
+    const jid =
+      dataId.match(/^(?:true|false)_([^_]+@[^_]+)_/i)?.[1] ??
+      dataId.match(/_([^_]+@(c|g|newsletter)\.us)_/i)?.[1];
+    if (jid) {
+      return `wa:jid:${jid.toLowerCase()}`;
+    }
+  }
+
+  return null;
+}
+
 function hasVisibleConversationComposer(): boolean {
   const selectors = [
     '#main div[contenteditable="true"][data-tab]',
@@ -211,6 +230,10 @@ function hasVisibleConversationComposer(): boolean {
 
 export function hasOpenConversation(): boolean {
   if (hasVisibleConversationComposer()) {
+    return true;
+  }
+
+  if (readConversationIdFromMessageNodes()) {
     return true;
   }
 
@@ -238,6 +261,11 @@ export function getCurrentConversationId(): string {
   const phone = url.searchParams.get('phone');
   if (phone) {
     return `wa:${phone}`;
+  }
+
+  const messageNodeConversationId = readConversationIdFromMessageNodes();
+  if (messageNodeConversationId) {
+    return messageNodeConversationId;
   }
 
   const pathParts = url.pathname.split('/').filter(Boolean);

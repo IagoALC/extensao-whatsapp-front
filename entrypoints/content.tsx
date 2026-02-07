@@ -25,7 +25,10 @@ const HOST_ID = 'wa-copilot-sidebar-host';
 const POLL_INTERVAL_MS = 2000;
 const CLOSE_STABILITY_POLLS = 3;
 const OBSERVER_RESCAN_EVERY_POLLS = 4;
+const OBSERVER_INITIAL_RESCAN_DELAYS_MS = [0, 250, 900, 1800, 3200, 5000];
 const BOOT_LOCK_ATTR = 'data-wa-copilot-boot-owner';
+const UNKNOWN_CONVERSATION_ID = 'wa:unknown';
+const UNKNOWN_CONVERSATION_TITLE = 'Conversa atual';
 
 type AppRuntime = {
   db: WACopilotDb;
@@ -97,7 +100,7 @@ function ensureSidebarMount(): HTMLElement {
       --wa-shadow-focus: 0 0 0 3px rgba(11, 138, 106, 0.22);
       width: min(420px, calc(100vw - 24px));
       max-height: calc(100vh - 24px);
-      overflow: auto;
+      overflow: visible;
       border-radius: 20px;
       padding: 4px;
       background:
@@ -106,29 +109,35 @@ function ensureSidebarMount(): HTMLElement {
         linear-gradient(160deg, var(--wa-color-bg-1) 0%, var(--wa-color-bg-2) 100%);
       font-family: "Manrope", "Plus Jakarta Sans", "Avenir Next", "Segoe UI", sans-serif;
       color: var(--wa-color-text);
-      scrollbar-width: thin;
-      scrollbar-color: rgba(16, 42, 60, 0.35) transparent;
     }
 
-    #wa-copilot-mount::-webkit-scrollbar {
-      width: 8px;
-      height: 8px;
-    }
-
-    #wa-copilot-mount::-webkit-scrollbar-thumb {
-      border-radius: 999px;
-      background: rgba(16, 42, 60, 0.32);
-    }
-
-    #wa-copilot-mount::-webkit-scrollbar-track {
-      background: transparent;
+    .wa-layout {
+      position: relative;
     }
 
     .wa-shell {
       display: grid;
       gap: 12px;
       padding: 6px;
+      max-height: calc(100vh - 24px);
+      overflow: auto;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(16, 42, 60, 0.35) transparent;
       animation: wa-shell-enter 220ms ease-out;
+    }
+
+    .wa-shell::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    .wa-shell::-webkit-scrollbar-thumb {
+      border-radius: 999px;
+      background: rgba(16, 42, 60, 0.32);
+    }
+
+    .wa-shell::-webkit-scrollbar-track {
+      background: transparent;
     }
 
     @keyframes wa-shell-enter {
@@ -430,6 +439,10 @@ function ensureSidebarMount(): HTMLElement {
       padding: 0 10px;
     }
 
+    .wa-btn--fit {
+      width: auto;
+    }
+
     .wa-action-grid .wa-btn--lg {
       grid-column: 1 / -1;
     }
@@ -488,6 +501,50 @@ function ensureSidebarMount(): HTMLElement {
     .wa-empty-state strong {
       font-size: 13px;
       color: var(--wa-color-text);
+    }
+
+    .wa-suggestions-popout {
+      position: absolute;
+      right: calc(100% + 14px);
+      top: 6px;
+      width: min(392px, calc(100vw - 460px));
+      max-height: calc(100vh - 32px);
+      z-index: 6;
+      opacity: 0;
+      transform: translateX(14px) scale(0.985);
+      transform-origin: right top;
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+
+    .wa-suggestions-popout--open {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+      pointer-events: auto;
+    }
+
+    .wa-suggestions-popout > .wa-card {
+      max-height: calc(100vh - 32px);
+      overflow: auto;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(16, 42, 60, 0.35) transparent;
+    }
+
+    .wa-suggestions-popout > .wa-card::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    .wa-suggestions-popout > .wa-card::-webkit-scrollbar-thumb {
+      border-radius: 999px;
+      background: rgba(16, 42, 60, 0.32);
+    }
+
+    .wa-suggestions-popout-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
     }
 
     .wa-suggestions-list {
@@ -611,6 +668,25 @@ function ensureSidebarMount(): HTMLElement {
       border-color: rgba(196, 66, 78, 0.3);
       background: rgba(196, 66, 78, 0.12);
       color: #8c1e2d;
+    }
+
+    @media (max-width: 1320px) {
+      .wa-suggestions-popout {
+        right: 0;
+        top: calc(100% + 10px);
+        width: 100%;
+        max-height: 42vh;
+        transform-origin: top right;
+        transform: translateY(-8px) scale(0.985);
+      }
+
+      .wa-suggestions-popout--open {
+        transform: translateY(0) scale(1);
+      }
+
+      .wa-suggestions-popout > .wa-card {
+        max-height: 42vh;
+      }
     }
 
     @media (max-width: 920px) {
@@ -746,8 +822,35 @@ export default defineContentScript({
       const settings = await getRuntimeSettings();
       let consentGranted = settings.consentGranted;
       let observer: WhatsappConversationObserver | null = null;
+      let observerInitialRescanTimers: number[] = [];
+      const hasKnownConversationId = () =>
+        currentConversationId !== UNKNOWN_CONVERSATION_ID;
+
+      const clearInitialObserverRescans = () => {
+        for (const timerId of observerInitialRescanTimers) {
+          window.clearTimeout(timerId);
+        }
+        observerInitialRescanTimers = [];
+      };
+
+      const scheduleInitialObserverRescans = () => {
+        clearInitialObserverRescans();
+        if (!observer || !consentGranted || !hasKnownConversationId()) {
+          return;
+        }
+        observerInitialRescanTimers = OBSERVER_INITIAL_RESCAN_DELAYS_MS.map(
+          (delayMs) =>
+            window.setTimeout(() => {
+              if (!observer || !consentGranted || !hasKnownConversationId()) {
+                return;
+              }
+              observer.refreshSnapshot();
+            }, delayMs),
+        );
+      };
 
       const stopObserver = () => {
+        clearInitialObserverRescans();
         observer?.stop();
         observer = null;
       };
@@ -759,8 +862,7 @@ export default defineContentScript({
 
         observer = new WhatsappConversationObserver({
           tenantId: 'default',
-          getConversationId: () =>
-            currentConversationOpen ? currentConversationId : '',
+          getConversationId: () => (hasKnownConversationId() ? currentConversationId : ''),
           onMessage: async (event) => {
             const inserted = await saveMessage(event);
             if (!inserted) {
@@ -771,6 +873,7 @@ export default defineContentScript({
           },
         });
         observer.start();
+        scheduleInitialObserverRescans();
       };
 
       const rerender = () =>
@@ -818,7 +921,10 @@ export default defineContentScript({
 
       window.setInterval(() => {
         pollCount += 1;
-        const detectedConversationOpen = hasOpenConversation();
+        const rawConversationId = getCurrentConversationId();
+        const rawConversationTitle = getCurrentConversationTitle();
+        const detectedConversationOpen =
+          hasOpenConversation() || rawConversationId !== UNKNOWN_CONVERSATION_ID;
         if (detectedConversationOpen) {
           closedPollStreak = 0;
         } else {
@@ -828,14 +934,37 @@ export default defineContentScript({
         const nextConversationOpen =
           detectedConversationOpen || closedPollStreak < CLOSE_STABILITY_POLLS;
 
-        const rawConversationId = getCurrentConversationId();
-        const rawConversationTitle = getCurrentConversationTitle();
+        const isRawConversationIdUnknown =
+          rawConversationId === UNKNOWN_CONVERSATION_ID;
+        const isRawConversationTitleUnknown =
+          rawConversationTitle === UNKNOWN_CONVERSATION_TITLE;
+        const shouldPreserveCurrentConversationIdentity =
+          (currentConversationOpen || nextConversationOpen) &&
+          (isRawConversationIdUnknown || isRawConversationTitleUnknown);
+        const shouldKeepKnownConversationId =
+          currentConversationId !== UNKNOWN_CONVERSATION_ID &&
+          isRawConversationIdUnknown;
+        const shouldKeepKnownConversationTitle =
+          currentConversationTitle !== UNKNOWN_CONVERSATION_TITLE &&
+          isRawConversationTitleUnknown;
+        const isLikelySameConversationWithDifferentIdSource =
+          currentConversationOpen &&
+          nextConversationOpen &&
+          currentConversationId !== UNKNOWN_CONVERSATION_ID &&
+          rawConversationId !== currentConversationId &&
+          (isRawConversationTitleUnknown ||
+            currentConversationTitle === UNKNOWN_CONVERSATION_TITLE ||
+            rawConversationTitle === currentConversationTitle);
+
         const nextConversationId =
-          rawConversationId === 'wa:unknown' && currentConversationOpen
+          shouldKeepKnownConversationId ||
+          isLikelySameConversationWithDifferentIdSource ||
+          (shouldPreserveCurrentConversationIdentity && isRawConversationIdUnknown)
             ? currentConversationId
             : rawConversationId;
         const nextConversationTitle =
-          rawConversationTitle === 'Conversa atual' && currentConversationOpen
+          shouldKeepKnownConversationTitle ||
+          (shouldPreserveCurrentConversationIdentity && isRawConversationTitleUnknown)
             ? currentConversationTitle
             : rawConversationTitle;
         const conversationChanged =
@@ -848,13 +977,16 @@ export default defineContentScript({
           currentConversationTitle = nextConversationTitle;
           currentConversationOpen = nextConversationOpen;
           rerender();
+          if (observer && consentGranted && hasKnownConversationId()) {
+            scheduleInitialObserverRescans();
+          }
         }
 
         if (
           observer &&
           consentGranted &&
-          currentConversationOpen &&
-          (conversationChanged || pollCount % OBSERVER_RESCAN_EVERY_POLLS === 0)
+          hasKnownConversationId() &&
+          pollCount % OBSERVER_RESCAN_EVERY_POLLS === 0
         ) {
           observer.refreshSnapshot();
         }

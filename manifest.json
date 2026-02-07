@@ -6,7 +6,10 @@
   "permissions": ["storage"],
   "host_permissions": [
     "https://web.whatsapp.com/*",
-    "http://localhost:8080/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://localhost/*",
+    "https://127.0.0.1/*",
     "https://api.wacopilot.app/*"
   ],
   "background": {

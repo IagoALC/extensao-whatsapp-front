@@ -44,11 +44,12 @@ async function handleApiBridgeRequest(
   request: ApiBridgeRequest,
 ): Promise<ApiBridgeResponse> {
   const { baseUrl, path, method, headers, body, timeoutMs } = request.payload;
+  const targetURL = `${baseUrl}${path}`;
   const controller = new AbortController();
   const timeoutId = globalThis.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${baseUrl}${path}`, {
+    const response = await fetch(targetURL, {
       method,
       headers,
       body,
@@ -68,7 +69,7 @@ async function handleApiBridgeRequest(
       type: 'wa-copilot:api-response',
       ok: false,
       status: 0,
-      networkError,
+      networkError: `${networkError} (url: ${targetURL})`,
     };
   } finally {
     globalThis.clearTimeout(timeoutId);
